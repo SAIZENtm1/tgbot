@@ -1,7 +1,8 @@
 """
-Telegram Feedback Bot - Premium Version
-=======================================
+Telegram Feedback Bot - Premium Secure Version
+==============================================
 Beautiful, user-friendly Telegram bot for collecting ratings.
+Features: One vote per user, auto-delete messages, secure storage.
 """
 
 import json
@@ -14,7 +15,7 @@ import requests
 from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
-from flask import Flask, request
+from flask import Flask, request, abort
 
 # Load environment variables
 load_dotenv()
@@ -29,6 +30,9 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 TIMEZONE = ZoneInfo("Asia/Tashkent")
 PORT = int(os.getenv("PORT", 8080))
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+# Security: Webhook secret token (optional but recommended)
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
 # ============================================================================
 # LOGGING
@@ -125,6 +129,19 @@ Biz sizni xafa qilganimiz uchun uzr so'raymiz. Xizmatlarimizni yaxshilash uchun 
 Приносим извинения, если что-то пошло не так. Мы сделаем всё, чтобы стать лучше! 🙏"""
 
 
+def get_already_voted_text(first_name: str) -> str:
+    """Text for users who already voted."""
+    return f"""⚠️ {first_name}, siz allaqachon ovoz bergansiz!
+
+Har bir foydalanuvchi faqat bir marta ovoz berishi mumkin.
+
+━━━━━━━━━━━━━━━━━━━━━━
+
+⚠️ {first_name}, вы уже проголосовали!
+
+Каждый пользователь может проголосовать только один раз."""
+
+
 # Rating buttons in 3x3 grid
 RATING_BUTTONS = [
     [("9 🌟", "9"), ("8 🔥", "8"), ("7 💎", "7")],
@@ -160,12 +177,11 @@ def answer_callback_query(callback_query_id, text=None):
     return telegram_api("answerCallbackQuery", data)
 
 
-def edit_message_reply_markup(chat_id, message_id):
-    """Remove inline keyboard."""
-    return telegram_api("editMessageReplyMarkup", {
+def delete_message(chat_id, message_id):
+    """Delete a message."""
+    return telegram_api("deleteMessage", {
         "chat_id": chat_id,
-        "message_id": message_id,
-        "reply_markup": None
+        "message_id": message_id
     })
 
 
@@ -175,6 +191,7 @@ def edit_message_reply_markup(chat_id, message_id):
 
 _sheets_client = None
 _processed_updates: set[int] = set()
+_voted_users: set[int] = set()  # Track users who already voted
 
 
 def get_sheets_client():
@@ -199,6 +216,34 @@ def get_sheets_client():
     return _sheets_client
 
 
+def load_voted_users():
+    """Load list of users who already voted from Google Sheets."""
+    global _voted_users
+    try:
+        client = get_sheets_client()
+        spreadsheet = client.open_by_key(SPREADSHEET_ID)
+        sheet = spreadsheet.sheet1
+        
+        # Get all user_ids from column C (assuming header in row 1)
+        all_values = sheet.get_all_values()
+        if len(all_values) > 1:  # Skip header
+            _voted_users = {row[2] for row in all_values[1:] if len(row) > 2 and row[2]}
+        
+        logger.info(f"Loaded {len(_voted_users)} voted users")
+    except Exception as e:
+        logger.error(f"Failed to load voted users: {e}")
+
+
+def has_user_voted(user_id: int) -> bool:
+    """Check if user has already voted."""
+    return str(user_id) in _voted_users
+
+
+def mark_user_as_voted(user_id: int):
+    """Mark user as voted."""
+    _voted_users.add(str(user_id))
+
+
 def save_to_sheet(data: dict) -> bool:
     """Save rating data to Google Sheets."""
     try:
@@ -211,6 +256,7 @@ def save_to_sheet(data: dict) -> bool:
         row = [
             timestamp,
             data["rating"],
+            str(data["user_id"]),  # Store as string for consistency
             data["name"],
             data["username"],
         ]
@@ -241,7 +287,20 @@ def health():
 def webhook():
     """Handle incoming Telegram updates."""
     try:
+        # Security: Verify webhook secret if configured
+        if WEBHOOK_SECRET:
+            secret_header = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if secret_header != WEBHOOK_SECRET:
+                logger.warning("Invalid webhook secret")
+                abort(403)
+        
         update = request.get_json()
+        
+        # Validate update structure
+        if not update or "update_id" not in update:
+            logger.warning("Invalid update structure")
+            return "OK", 200
+        
         update_id = update.get("update_id")
         
         # Deduplication
@@ -260,7 +319,14 @@ def webhook():
         if message and message.get("text") == "/start":
             chat_id = message["chat"]["id"]
             user = message["from"]
+            user_id = user["id"]
             first_name = user.get("first_name", "друг")
+            
+            # Check if user already voted
+            if has_user_voted(user_id):
+                send_message(chat_id, get_already_voted_text(first_name))
+                logger.info(f"User {user_id} tried to vote again")
+                return "OK", 200
             
             # Build 3x3 keyboard
             keyboard = [
@@ -270,44 +336,59 @@ def webhook():
             reply_markup = {"inline_keyboard": keyboard}
             
             send_message(chat_id, get_question_text(first_name), reply_markup)
-            logger.info(f"Sent question to user {user['id']}")
+            logger.info(f"Sent question to user {user_id}")
         
         # Handle callback (rating click)
         callback_query = update.get("callback_query")
         if callback_query:
             cb_id = callback_query["id"]
             user = callback_query["from"]
+            user_id = user["id"]
             rating = int(callback_query["data"])
             first_name = user.get("first_name", "друг")
             msg = callback_query["message"]
             chat_id = msg["chat"]["id"]
             message_id = msg["message_id"]
             
+            # Double-check if user already voted
+            if has_user_voted(user_id):
+                answer_callback_query(cb_id, "⚠️ Siz allaqachon ovoz bergansiz!")
+                delete_message(chat_id, message_id)
+                logger.info(f"User {user_id} tried to vote again via callback")
+                return "OK", 200
+            
             # Answer callback with quick feedback
             answer_callback_query(cb_id, f"✅ {rating} ⭐ qabul qilindi!")
             
-            # Remove keyboard
-            edit_message_reply_markup(chat_id, message_id)
+            # Delete the poll message
+            delete_message(chat_id, message_id)
             
             # Save to sheet
             data = {
                 "rating": rating,
+                "user_id": user_id,
                 "name": first_name,
                 "username": f"@{user['username']}" if user.get("username") else "-",
             }
             save_to_sheet(data)
             
+            # Mark user as voted
+            mark_user_as_voted(user_id)
+            
             # Send personalized thank you
             send_message(chat_id, get_thank_you_text(rating, first_name))
-            logger.info(f"Processed rating {rating} from user {user['id']}")
+            logger.info(f"Processed rating {rating} from user {user_id}")
         
         return "OK", 200
         
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
+        logger.error(f"Webhook error: {e}", exc_info=True)
         return "Error", 500
 
 
 if __name__ == "__main__":
+    # Load voted users on startup
+    load_voted_users()
+    
     logger.info(f"Starting webhook server on port {PORT}")
     app.run(host="0.0.0.0", port=PORT)
