@@ -2,7 +2,7 @@
 Telegram Feedback Bot - Cloud Run Webhook Version
 ==================================================
 Production-ready Telegram bot for collecting user ratings.
-Uses webhook mode for serverless deployment (Cloud Run).
+Uses webhook mode for serverless deployment (Railway/Cloud Run).
 """
 
 import json
@@ -11,12 +11,11 @@ import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import requests
 from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
 from flask import Flask, request
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, Bot
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler
 
 # Load environment variables
 load_dotenv()
@@ -30,6 +29,7 @@ GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 TIMEZONE = ZoneInfo("Asia/Tashkent")
 PORT = int(os.getenv("PORT", 8080))
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # ============================================================================
 # LOGGING
@@ -75,6 +75,39 @@ RATING_BUTTONS = [
 ]
 
 # ============================================================================
+# TELEGRAM API (synchronous)
+# ============================================================================
+
+def telegram_api(method, data):
+    """Call Telegram API synchronously."""
+    url = f"{TELEGRAM_API}/{method}"
+    response = requests.post(url, json=data)
+    return response.json()
+
+
+def send_message(chat_id, text, reply_markup=None):
+    """Send a message."""
+    data = {"chat_id": chat_id, "text": text}
+    if reply_markup:
+        data["reply_markup"] = reply_markup
+    return telegram_api("sendMessage", data)
+
+
+def answer_callback_query(callback_query_id):
+    """Answer callback query."""
+    return telegram_api("answerCallbackQuery", {"callback_query_id": callback_query_id})
+
+
+def edit_message_reply_markup(chat_id, message_id):
+    """Remove inline keyboard."""
+    return telegram_api("editMessageReplyMarkup", {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "reply_markup": None
+    })
+
+
+# ============================================================================
 # GOOGLE SHEETS
 # ============================================================================
 
@@ -91,13 +124,11 @@ def get_sheets_client():
             "https://www.googleapis.com/auth/drive",
         ]
         
-        # Try to get credentials from environment variable (for Railway)
         google_creds_json = os.getenv("GOOGLE_CREDENTIALS")
         if google_creds_json:
             creds_dict = json.loads(google_creds_json)
             credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         else:
-            # Fallback to file (for local development)
             credentials = Credentials.from_service_account_file(
                 GOOGLE_CREDENTIALS_FILE, scopes=scopes
             )
@@ -132,12 +163,10 @@ def save_to_sheet(data: dict) -> bool:
 
 
 # ============================================================================
-# FLASK APP (for webhook)
+# FLASK APP
 # ============================================================================
 
 app = Flask(__name__)
-bot = Bot(token=BOT_TOKEN)
-application = Application.builder().token(BOT_TOKEN).build()
 
 
 @app.route("/", methods=["GET"])
@@ -150,13 +179,13 @@ def health():
 def webhook():
     """Handle incoming Telegram updates."""
     try:
-        update_data = request.get_json()
-        update = Update.de_json(update_data, bot)
+        update = request.get_json()
+        update_id = update.get("update_id")
         
         # Deduplication
-        if update.update_id in _processed_updates:
+        if update_id in _processed_updates:
             return "OK", 200
-        _processed_updates.add(update.update_id)
+        _processed_updates.add(update_id)
         
         # Cleanup old IDs
         if len(_processed_updates) > 10000:
@@ -165,47 +194,44 @@ def webhook():
                 _processed_updates.discard(old_id)
         
         # Handle /start
-        if update.message and update.message.text == "/start":
-            keyboard = [
-                [InlineKeyboardButton(text, callback_data=data)]
-                for text, data in RATING_BUTTONS
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+        message = update.get("message")
+        if message and message.get("text") == "/start":
+            chat_id = message["chat"]["id"]
+            user_id = message["from"]["id"]
             
-            bot.send_message(
-                chat_id=update.message.chat_id,
-                text=QUESTION_TEXT,
-                reply_markup=reply_markup,
-            )
-            logger.info(f"Sent question to user {update.effective_user.id}")
+            keyboard = [[{"text": text, "callback_data": data}] for text, data in RATING_BUTTONS]
+            reply_markup = {"inline_keyboard": keyboard}
+            
+            send_message(chat_id, QUESTION_TEXT, reply_markup)
+            logger.info(f"Sent question to user {user_id}")
         
         # Handle callback (rating click)
-        elif update.callback_query:
-            cb = update.callback_query
-            user = cb.from_user
-            rating = cb.data
+        callback_query = update.get("callback_query")
+        if callback_query:
+            cb_id = callback_query["id"]
+            user = callback_query["from"]
+            rating = callback_query["data"]
+            msg = callback_query["message"]
+            chat_id = msg["chat"]["id"]
+            message_id = msg["message_id"]
             
             # Answer callback
-            bot.answer_callback_query(cb.id)
+            answer_callback_query(cb_id)
             
             # Remove keyboard
-            bot.edit_message_reply_markup(
-                chat_id=cb.message.chat_id,
-                message_id=cb.message.message_id,
-                reply_markup=None,
-            )
+            edit_message_reply_markup(chat_id, message_id)
             
             # Save to sheet
             data = {
                 "rating": rating,
-                "name": user.first_name or "-",
-                "username": f"@{user.username}" if user.username else "-",
+                "name": user.get("first_name", "-"),
+                "username": f"@{user['username']}" if user.get("username") else "-",
             }
             save_to_sheet(data)
             
             # Send thank you
-            bot.send_message(chat_id=cb.message.chat_id, text=THANK_YOU_TEXT)
-            logger.info(f"Processed rating {rating} from user {user.id}")
+            send_message(chat_id, THANK_YOU_TEXT)
+            logger.info(f"Processed rating {rating} from user {user['id']}")
         
         return "OK", 200
         
