@@ -5,6 +5,7 @@ Production-ready Telegram bot for collecting user ratings.
 Uses webhook mode for serverless deployment (Cloud Run).
 """
 
+import json
 import logging
 import os
 from datetime import datetime
@@ -89,9 +90,18 @@ def get_sheets_client():
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
         ]
-        credentials = Credentials.from_service_account_file(
-            GOOGLE_CREDENTIALS_FILE, scopes=scopes
-        )
+        
+        # Try to get credentials from environment variable (for Railway)
+        google_creds_json = os.getenv("GOOGLE_CREDENTIALS")
+        if google_creds_json:
+            creds_dict = json.loads(google_creds_json)
+            credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        else:
+            # Fallback to file (for local development)
+            credentials = Credentials.from_service_account_file(
+                GOOGLE_CREDENTIALS_FILE, scopes=scopes
+            )
+        
         _sheets_client = gspread.authorize(credentials)
     return _sheets_client
 
