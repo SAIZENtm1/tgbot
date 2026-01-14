@@ -1,8 +1,7 @@
 """
-Telegram Feedback Bot - Cloud Run Webhook Version
-==================================================
-Production-ready Telegram bot for collecting user ratings.
-Uses webhook mode for serverless deployment (Railway/Cloud Run).
+Telegram Feedback Bot - Premium Version
+=======================================
+Beautiful, user-friendly Telegram bot for collecting ratings.
 """
 
 import json
@@ -45,37 +44,96 @@ logger = logging.getLogger(__name__)
 # TEXTS
 # ============================================================================
 
-QUESTION_TEXT = (
-    "Komрaniyamizni do'stlaringiz yoki tanishlaringizga tavsiya qilish "
-    "ehtimolingiz qanchalik yuqori?\n\n"
-    "Насколько вероятно, что вы порекомендуете нашу компанию своим "
-    "друзьям или знакомым?"
-)
+def get_question_text(first_name: str) -> str:
+    """Generate personalized question text."""
+    return f"""👋 Salom, {first_name}!
+    
+━━━━━━━━━━━━━━━━━━━━━━
 
-THANK_YOU_TEXT = (
-    "Qimmatli vaqtingizni ajratib fikringizni bildirganingiz uchun tashakkur!\n"
-    "Sizning bahoingiz biz uchun juda muhim va xizmatlarimizni yanada "
-    "yaxshilashga yordam beradi.Sizga yanada yaxshi tajriba taqdim etish "
-    "uchun doim harakatdamiz! 💙\n\n"
-    "Благодарим вас за то, что нашли время поделиться своим мнением!\n"
-    "Ваша оценка очень важна для нас и помогает нам становиться лучше."
-    "Мы всегда стремимся предоставить вам лучший сервис! 💙"
-)
+📊 *Kompaniyamizni baholang*
 
+Kompaniyamizni do'stlaringiz yoki tanishlaringizga tavsiya qilish ehtimoliyatingiz qanchalik yuqori?
+
+━━━━━━━━━━━━━━━━━━━━━━
+
+👋 Привет, {first_name}!
+
+📊 *Оцените нашу компанию*
+
+Насколько вероятно, что вы порекомендуете нашу компанию своим друзьям или знакомым?
+
+━━━━━━━━━━━━━━━━━━━━━━
+
+⬇️ Tanlang / Выберите оценку:"""
+
+
+def get_thank_you_text(rating: int, first_name: str) -> str:
+    """Generate thank you text based on rating."""
+    
+    if rating >= 8:
+        # High rating - Promoters
+        return f"""🎉 *Rahmat, {first_name}!*
+
+━━━━━━━━━━━━━━━━━━━━━━
+
+Sizning {rating} ⭐ bahoingiz biz uchun juda qimmatli!
+
+Bizga ishonganingiz uchun tashakkur. Sizga eng yaxshi xizmatni taqdim etishda davom etamiz! 💙
+
+━━━━━━━━━━━━━━━━━━━━━━
+
+🎉 *Спасибо, {first_name}!*
+
+Ваша оценка {rating} ⭐ очень ценна для нас!
+
+Благодарим за доверие. Мы продолжим предоставлять вам лучший сервис! 💙"""
+
+    elif rating >= 5:
+        # Medium rating - Passives
+        return f"""🙏 *Rahmat, {first_name}!*
+
+━━━━━━━━━━━━━━━━━━━━━━
+
+Sizning {rating} ⭐ bahoingiz uchun tashakkur!
+
+Fikr-mulohazangiz biz uchun muhim. Xizmatlarimizni yaxshilash ustida ishlaymiz! 💪
+
+━━━━━━━━━━━━━━━━━━━━━━
+
+🙏 *Спасибо, {first_name}!*
+
+Благодарим за вашу оценку {rating} ⭐!
+
+Ваше мнение важно для нас. Мы работаем над улучшением сервиса! 💪"""
+
+    else:
+        # Low rating - Detractors
+        return f"""💙 *Rahmat, {first_name}!*
+
+━━━━━━━━━━━━━━━━━━━━━━
+
+Sizning {rating} ⭐ bahoingiz uchun tashakkur.
+
+Biz sizni xafa qilganimiz uchun uzr so'raymiz. Xizmatlarimizni yaxshilash uchun barcha kuchimizni sarflaymiz! 🙏
+
+━━━━━━━━━━━━━━━━━━━━━━
+
+💙 *Спасибо, {first_name}!*
+
+Благодарим за вашу оценку {rating} ⭐.
+
+Приносим извинения, если что-то пошло не так. Мы сделаем всё, чтобы стать лучше! 🙏"""
+
+
+# Rating buttons in 3x3 grid
 RATING_BUTTONS = [
-    ("9 🌟", "9"),
-    ("8 🔥", "8"),
-    ("7 💎", "7"),
-    ("6 😊", "6"),
-    ("5 👍", "5"),
-    ("4 🤔", "4"),
-    ("3 😕", "3"),
-    ("2 😞", "2"),
-    ("1 💀", "1"),
+    [("9 🌟", "9"), ("8 🔥", "8"), ("7 💎", "7")],
+    [("6 😊", "6"), ("5 👍", "5"), ("4 🤔", "4")],
+    [("3 😕", "3"), ("2 😞", "2"), ("1 💀", "1")],
 ]
 
 # ============================================================================
-# TELEGRAM API (synchronous)
+# TELEGRAM API
 # ============================================================================
 
 def telegram_api(method, data):
@@ -85,17 +143,21 @@ def telegram_api(method, data):
     return response.json()
 
 
-def send_message(chat_id, text, reply_markup=None):
+def send_message(chat_id, text, reply_markup=None, parse_mode="Markdown"):
     """Send a message."""
-    data = {"chat_id": chat_id, "text": text}
+    data = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
     if reply_markup:
         data["reply_markup"] = reply_markup
     return telegram_api("sendMessage", data)
 
 
-def answer_callback_query(callback_query_id):
+def answer_callback_query(callback_query_id, text=None):
     """Answer callback query."""
-    return telegram_api("answerCallbackQuery", {"callback_query_id": callback_query_id})
+    data = {"callback_query_id": callback_query_id}
+    if text:
+        data["text"] = text
+        data["show_alert"] = False
+    return telegram_api("answerCallbackQuery", data)
 
 
 def edit_message_reply_markup(chat_id, message_id):
@@ -197,26 +259,32 @@ def webhook():
         message = update.get("message")
         if message and message.get("text") == "/start":
             chat_id = message["chat"]["id"]
-            user_id = message["from"]["id"]
+            user = message["from"]
+            first_name = user.get("first_name", "друг")
             
-            keyboard = [[{"text": text, "callback_data": data}] for text, data in RATING_BUTTONS]
+            # Build 3x3 keyboard
+            keyboard = [
+                [{"text": text, "callback_data": data} for text, data in row]
+                for row in RATING_BUTTONS
+            ]
             reply_markup = {"inline_keyboard": keyboard}
             
-            send_message(chat_id, QUESTION_TEXT, reply_markup)
-            logger.info(f"Sent question to user {user_id}")
+            send_message(chat_id, get_question_text(first_name), reply_markup)
+            logger.info(f"Sent question to user {user['id']}")
         
         # Handle callback (rating click)
         callback_query = update.get("callback_query")
         if callback_query:
             cb_id = callback_query["id"]
             user = callback_query["from"]
-            rating = callback_query["data"]
+            rating = int(callback_query["data"])
+            first_name = user.get("first_name", "друг")
             msg = callback_query["message"]
             chat_id = msg["chat"]["id"]
             message_id = msg["message_id"]
             
-            # Answer callback
-            answer_callback_query(cb_id)
+            # Answer callback with quick feedback
+            answer_callback_query(cb_id, f"✅ {rating} ⭐ qabul qilindi!")
             
             # Remove keyboard
             edit_message_reply_markup(chat_id, message_id)
@@ -224,13 +292,13 @@ def webhook():
             # Save to sheet
             data = {
                 "rating": rating,
-                "name": user.get("first_name", "-"),
+                "name": first_name,
                 "username": f"@{user['username']}" if user.get("username") else "-",
             }
             save_to_sheet(data)
             
-            # Send thank you
-            send_message(chat_id, THANK_YOU_TEXT)
+            # Send personalized thank you
+            send_message(chat_id, get_thank_you_text(rating, first_name))
             logger.info(f"Processed rating {rating} from user {user['id']}")
         
         return "OK", 200
