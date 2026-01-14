@@ -1,0 +1,11 @@
+{
+    "name": "tgbot-feedback",
+    "description": "Telegram Feedback Bot",
+    "build": {
+        "builder": "NIXPACKS"
+    },
+    "deploy": {
+        "numReplicas": 1,
+        "restartPolicyType": "ON_FAILURE"
+    }
+}
